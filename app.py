@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # Import CORS
 from flask_apscheduler import APScheduler
 from medications import medications_bp  # Import the medications blueprint
 from auth import auth_bp  # Import the auth blueprint
@@ -13,6 +14,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Initialize Flask app
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your_default_secret_key')  # Use environment variable for secret key
 
 # Initialize Firebase Admin SDK
