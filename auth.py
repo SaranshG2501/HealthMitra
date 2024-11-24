@@ -25,6 +25,7 @@ def create_user(username, password, email):
             password=password,
             display_name=username
         )
+        # Store user information in Firestore
         user_ref = db.collection('users').document(user.uid)
         user_ref.set({
             'username': username,
@@ -66,6 +67,7 @@ def login():
     try:
         user = auth.get_user_by_email(email)
         # Note: Password verification should be done on the client-side
+        # Here you would typically return a token or user data
         return jsonify({"success": True, "message": "User  authenticated successfully!", "user_id": user.uid}), 200
     except UserNotFoundError:
         return jsonify({"success": False, "message": "No user record found for the provided email!"}), 404
