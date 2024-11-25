@@ -86,6 +86,22 @@ def retrieve(date):
         logging.warning(f"No image found for the date: {date}.")
         return jsonify({"success": False, "message": "No image found for the specified date."}), 404
 
+    
+@app.route('/forgot-password', methods=['POST'])
+def forgot_password():
+    email = request.json.get('email')
+
+    if not email:
+        return jsonify({"success": False, "message": "Email is required!"}), 400
+
+    try:
+        # Send password reset email
+        firebase_admin.auth.send_password_reset_email(email)
+        return jsonify({"success": True, "message": "Password reset email sent!"}), 200
+    except Exception as e:
+        logging.error(f"Error sending password reset email: {e}")
+        return jsonify({"success": False, "message": "Failed to send password reset email."}), 500
+
 # Error handler for 404 Not Found
 @app.errorhandler(404)
 def not_found(error):
