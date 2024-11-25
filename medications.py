@@ -1,9 +1,11 @@
 from flask import Blueprint, request, jsonify
 from flask_apscheduler import APScheduler
+from flask_login import current_user
 from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, firestore
 import time
+from firebase_admin import messaging
 
 # Create a Blueprint for medications
 medications_bp = Blueprint('medications', __name__)
@@ -19,9 +21,6 @@ db = firestore.client()
 # Initialize the APScheduler
 scheduler = APScheduler()
 WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
-
-import firebase_admin
-from firebase_admin import messaging
 
 def send_reminder(medication):
     name = medication['name']
@@ -53,9 +52,10 @@ def add_medication():
     medication = {
         'name': data['name'],
         'dosage': data['dosage'],
-        'reminder_times': data['reminder_times'],  # Get reminder_times directly from data
+        'reminder_times': data['reminder_times'],
         'frequency': data['frequency'],
-        'next_reminder': None
+        'next_reminder': None,
+        'user_id': current_user.get_id()  # Add user_id from the current user
     }
 
     # Calculate the next reminder time
@@ -94,85 +94,44 @@ def add_medication():
         scheduler.add_job(func=send_reminder, trigger='date', run_date=medication['next_reminder'], args=[medication], id=job_id)
 
         # Save medication to Firestore
-        user_id = request.headers.get('Authorization')  # Assuming you pass the user ID in the Authorization header
-        if not user_id:
-            return jsonify({'message': 'User  ID not found in Authorization header!'}), 401
-
         medication_ref = db.collection('medications').document()  # Auto-generate document ID
-        medication['user_id'] = user_id  # Add user_id to medication
         medication_ref.set(medication)
 
     except Exception as e:
         return jsonify({'message': f'Error scheduling reminder: {str(e)}'}), 500
 
     return jsonify({'message': 'Medication added successfully!', 'medication': medication}), 201
-    ...
 
 @medications_bp.route('/update_medication/<string:name>', methods=['PUT'])
 def update_medication(name):
-    data = request .json
-    user_id = request.headers.get('Authorization')  # Assuming you pass the user ID in the Authorization header
+    data = request .get_json()
 
-    # Fetch the medication document
-    medication_ref = db.collection('medications').where('user_id', '==', user_id).where('name', '==', name).limit(1).stream()
+    if not data or 'dosage' not in data or 'reminder_times' not in data or 'frequency' not in data:
+        return jsonify({'message': 'Missing required fields!'}), 400
 
-    medication_doc = None
-    for med in medication_ref:
-        medication_doc = med.reference
+    medication_ref = db.collection('medications').where('name', '==', name).where('user_id', '==', current_user.get_id()).limit(1).get()
 
-    if not medication_doc:
+    if not medication_ref:
         return jsonify({'message': 'Medication not found!'}), 404
 
-    # Update medication fields
-    updated_fields = {}
-    if 'dosage' in data:
-        updated_fields['dosage'] = data['dosage']
-    if 'reminder_time' in data:
-        updated_fields['reminder_time'] = data['reminder_time']
-    if 'frequency' in data:
-        updated_fields['frequency'] = data['frequency']
+    medication_ref = medication_ref[0].reference
 
-    # Calculate the next reminder time if the frequency or reminder time has changed
-    if 'frequency' in data or 'reminder_time' in data:
-        if 'frequency' in data:
-            updated_fields['frequency'] = data['frequency']
-        if 'reminder_time' in data:
-            updated_fields['reminder_time'] = data['reminder_time']
+    medication_ref.update({
+        'dosage': data['dosage'],
+        'reminder_times': data['reminder_times'],
+        'frequency': data['frequency']
+    })
 
-        # Recalculate next reminder based on updated frequency
-        try:
-            if updated_fields['frequency'] == 'daily':
-                updated_fields['next_reminder'] = datetime.now().replace(hour=int(updated_fields['reminder_time'].split(':')[0]),
-                                                                         minute=int(updated_fields['reminder_time'].split(':')[1]),
-                                                                         second=0,
-                                                                         microsecond=0) + timedelta(days=1)
-            elif updated_fields['frequency'] == 'weekly':
-                updated_fields['next_reminder'] = datetime.now().replace(hour=int(updated_fields['reminder_time'].split(':')[0]),
-                                                                         minute=int(updated_fields['reminder_time'].split(':')[1]),
-                                                                         second=0,
-                                                                         microsecond=0) + timedelta(weeks=1)
-            elif updated_fields['frequency'] == 'specific':
-                updated_fields['next_reminder'] = datetime.strptime(data['specific_time'], '%Y-%m-%d %H:%M:%S')
-            else:
-                return jsonify({'message': 'Invalid frequency!'}), 400
-
-            # Reschedule the reminder with a unique ID
-            job_id = f"{updated_fields['name']}_{int(time.time())}"  # Create a unique job ID
-            scheduler.add_job(func=send_reminder, trigger='date', run_date=updated_fields['next_reminder'], args=[updated_fields], id=job_id)
-
-        except Exception as e:
-            return jsonify({'message': f'Error scheduling reminder: {str(e)}'}), 500
-
-    # Update the medication document in Firestore
-    medication_doc.update(updated_fields)
-
-    return jsonify({'message': 'Medication updated successfully!', 'updated_fields': updated_fields}), 200
+    return jsonify({'message': 'Medication updated successfully!'}), 200
 
 @medications_bp.route('/medications', methods=['GET'])
 def get_medications():
-    user_id = request.headers.get('Authorization')  # Assuming you pass the user ID in the Authorization header
+    if not current_user.is_authenticated:
+        return jsonify({'message': 'User  not authenticated!'}), 401
+
+    user_id = current_user.get_id()
     medications_ref = db.collection('medications').where('user_id', '==', user_id).stream()
-    
+
     medications = []
     for med in medications_ref:
         medications.append(med.to_dict())
@@ -181,20 +140,10 @@ def get_medications():
 
 @medications_bp.route('/delete_medication/<string:name>', methods=['DELETE'])
 def delete_medication(name):
-    user_id = request.headers.get('Authorization')  # Assuming you pass the user ID in the Authorization header
-    medications_ref = db.collection('medications').where('user_id', '==', user_id).where('name', '==', name).limit(1).stream()
+    medication_ref = db.collection('medications').where('name', '==', name).where('user_id', '==', current_user.get_id()).limit(1).get()
 
-    for med in medications_ref:
-        med.reference.delete()  # Delete the medication document
+    if not medication_ref:
+        return jsonify({'message': 'Medication not found!'}), 404
 
+    medication_ref[0].reference.delete()
     return jsonify({'message': 'Medication deleted successfully!'}), 200
-
-@medications_bp.route('/all_medications', methods=['GET'])
-def get_all_medications():
-    medications_ref = db.collection('medications').stream()
-    
-    medications = []
-    for med in medications_ref:
-        medications.append(med.to_dict())
-
-    return jsonify(medications), 200
