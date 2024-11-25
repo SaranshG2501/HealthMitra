@@ -40,17 +40,19 @@ def send_reminder(medication):
     # Send the message
     try:
         response = messaging.send(message)
-        print('Successfully sent message:', response)
+        logging.info('Successfully sent message: %s', response)
     except Exception as e:
         logging.error(f"Failed to send message: {str(e)}")
 
 def calculate_next_reminder(medication):
     """Calculate the next reminder time based on frequency and reminder times."""
+    now = datetime.now()
+    
     if medication['frequency'] == 'daily':
         reminder_time = medication['reminder_times']['daily']
         hour, minute = map(int, reminder_time.split(':'))
-        next_reminder = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if next_reminder < datetime.now():
+        next_reminder = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if next_reminder < now:
             next_reminder += timedelta(days=1)
         return next_reminder
 
@@ -60,8 +62,8 @@ def calculate_next_reminder(medication):
             if day in medication['reminder_times']:
                 reminder_time = medication['reminder_times'][day]
                 hour, minute = map(int, reminder_time.split(':'))
-                next_reminder = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if next_reminder < datetime.now():
+                next_reminder = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if next_reminder < now:
                     next_reminder += timedelta(weeks=1)
                 next_reminders.append(next_reminder)
         return min(next_reminders) if next_reminders else None
@@ -73,11 +75,16 @@ def calculate_next_reminder(medication):
 
 @medications_bp.route('/add_medication', methods=['POST'])
 def add_medication():
+    # Check if the user is authenticated
+    if not current_user.is_authenticated:
+        return jsonify({'message': 'User  not authenticated!'}), 401
+
     # Get the input data from the request
     data = request.get_json()
 
     # Validate input data
-    if not all(k in data for k in ('name', 'dosage', 'reminder_times', 'frequency')):
+    required_fields = ('name', 'dosage', 'reminder_times', 'frequency')
+    if not all(field in data for field in required_fields):
         return jsonify({'message': 'Missing required fields!'}), 400
 
     medication = {
@@ -109,57 +116,38 @@ def add_medication():
 
     return jsonify({'message': 'Medication added successfully!', 'medication': medication}), 201
 
-@medications_bp.route('/update_medication/<string:name>', methods=['PUT'])
-def update_medication(name):
-    data = request.get_json()
-
-    if not data or 'dosage' not in data or 'reminder_times' not in data or 'frequency' not in data:
-        return jsonify({'message': 'Missing required fields!'}), 400
-
-    medication_ref = db.collection('medications').where('name', '==', name).where('user_email', '==', current_user.email).limit(1).get()
-
-    if not medication_ref:
-        return jsonify({'message': 'Medication not found!'}), 404
-
-    medication_ref = medication_ref[0].reference
-
-    try:
-        medication_ref.update({
-            'dosage': data['dosage'],
-            'reminder_times': data['reminder_times'],
-            'frequency': data['frequency']
-        })
-    except Exception as e:
-        logging.error(f"Error updating medication: {str(e)}")
-        return jsonify({'message': f'Error updating medication: {str(e)}'}), 500
-
-    return jsonify({'message': 'Medication updated successfully!'}), 200
-
-@medications_bp.route('/medications', methods=['GET'])
+@medications_bp.route('/get_medications', methods=['GET'])
 def get_medications():
+    # Check if the user is authenticated
     if not current_user.is_authenticated:
         return jsonify({'message': 'User  not authenticated!'}), 401
 
-    user_email = current_user.email
-    medications_ref = db.collection('medications').where('user_email', '==', user_email).stream()
-
-    medications = []
-    for med in medications_ref:
-        medications.append(med.to_dict())
-
-    return jsonify(medications), 200
-
-@medications_bp.route('/delete_medication/<string:name>', methods=['DELETE'])
-def delete_medication(name):
-    medication_ref = db.collection('medications').where('name', '==', name).where('user_email', '==', current_user.email).limit(1).get()
-
-    if not medication_ref:
-        return jsonify({'message': 'Medication not found!'}), 404
-
+    # Retrieve medications from Firestore
     try:
-        medication_ref[0].reference.delete()
+        medications_ref = db.collection('medications').where('user_email', '==', current_user.email).stream()
+        medications = [{**med.to_dict(), 'id': med.id} for med in medications_ref]
+    except Exception as e:
+        logging.error(f"Error retrieving medications: {str(e)}")
+        return jsonify({'message': f'Error retrieving medications: {str(e)}'}), 500
+
+    return jsonify({'medications': medications}), 200
+
+@medications_bp.route('/delete_medication/<medication_id>', methods=['DELETE'])
+def delete_medication(medication_id):
+    # Check if the user is authenticated
+    if not current_user.is_authenticated:
+        return jsonify({'message': 'User  not authenticated!'}), 401
+
+    # Delete medication from Firestore
+    try:
+        medication_ref = db.collection('medications').document(medication_id)
+        medication_ref.delete()
     except Exception as e:
         logging.error(f"Error deleting medication: {str(e)}")
         return jsonify({'message': f'Error deleting medication: {str(e)}'}), 500
 
     return jsonify({'message': 'Medication deleted successfully!'}), 200
+
+# Register the blueprint
+def register_medications_bp(app):
+    app.register_blueprint(medications_bp, url_prefix='/medications')
