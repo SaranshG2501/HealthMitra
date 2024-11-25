@@ -6,6 +6,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import time
 from firebase_admin import messaging
+import logging
 
 # Create a Blueprint for medications
 medications_bp = Blueprint('medications', __name__)
@@ -37,13 +38,43 @@ def send_reminder(medication):
     )
 
     # Send the message
-    response = messaging.send(message)
-    print('Successfully sent message:', response)
+    try:
+        response = messaging.send(message)
+        print('Successfully sent message:', response)
+    except Exception as e:
+        logging.error(f"Failed to send message: {str(e)}")
+
+def calculate_next_reminder(medication):
+    """Calculate the next reminder time based on frequency and reminder times."""
+    if medication['frequency'] == 'daily':
+        reminder_time = medication['reminder_times']['daily']
+        hour, minute = map(int, reminder_time.split(':'))
+        next_reminder = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if next_reminder < datetime.now():
+            next_reminder += timedelta(days=1)
+        return next_reminder
+
+    elif medication['frequency'] == 'weekly':
+        next_reminders = []
+        for day in WEEKDAYS:
+            if day in medication['reminder_times']:
+                reminder_time = medication['reminder_times'][day]
+                hour, minute = map(int, reminder_time.split(':'))
+                next_reminder = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if next_reminder < datetime.now():
+                    next_reminder += timedelta(weeks=1)
+                next_reminders.append(next_reminder)
+        return min(next_reminders) if next_reminders else None
+
+    elif medication['frequency'] == 'specific':
+        return datetime.strptime(medication['reminder_times']['specific'], '%Y-%m-%d %H:%M:%S')
+
+    return None
 
 @medications_bp.route('/add_medication', methods=['POST'])
 def add_medication():
     # Get the input data from the request
-    data = request.get_json()  # Ensure you are getting the JSON data from the request
+    data = request.get_json()
 
     # Validate input data
     if not all(k in data for k in ('name', 'dosage', 'reminder_times', 'frequency')):
@@ -55,39 +86,14 @@ def add_medication():
         'reminder_times': data['reminder_times'],
         'frequency': data['frequency'],
         'next_reminder': None,
-        'user_id': current_user.get_id()  # Add user_id from the current user
+        'user_email': current_user.email  # Ensure user is authenticated
     }
 
     # Calculate the next reminder time
     try:
-        if medication['frequency'] == 'daily':
-            medication['next_reminder'] = datetime.now().replace(
-                hour=int(medication['reminder_times']['daily'].split(':')[0]), 
-                minute=int(medication['reminder_times']['daily'].split(':')[1]), 
-                second=0, 
-                microsecond=0) + timedelta(days=1)
-
-        elif medication['frequency'] == 'weekly':
-            next_reminders = []
-            for day in WEEKDAYS:
-                if day in medication['reminder_times']:
-                    reminder_time = medication['reminder_times'][day]
-                    hour, minute = map(int, reminder_time.split(':'))
-                    next_reminder = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-                    # If the reminder time has already passed for today, schedule for next week
-                    if next_reminder < datetime.now():
-                        next_reminder += timedelta(weeks=1)
-
-                    next_reminders.append(next_reminder)
-
-            # Set the next reminder to the earliest one
-            medication['next_reminder'] = min(next_reminders)
-
-        elif medication['frequency'] == 'specific':
-            medication['next_reminder'] = datetime.strptime(data['specific_time'], '%Y-%m-%d %H:%M:%S')
-        else:
-            return jsonify({'message': 'Invalid frequency!'}), 400
+        medication['next_reminder'] = calculate_next_reminder(medication)
+        if medication['next_reminder'] is None:
+            return jsonify({'message': 'Invalid frequency or reminder times!'}), 400
 
         # Schedule the reminder with a unique ID
         job_id = f"{medication['name']}_{int(time.time())}"  # Create a unique job ID
@@ -98,29 +104,34 @@ def add_medication():
         medication_ref.set(medication)
 
     except Exception as e:
+        logging.error(f"Error scheduling reminder: {str(e)}")
         return jsonify({'message': f'Error scheduling reminder: {str(e)}'}), 500
 
     return jsonify({'message': 'Medication added successfully!', 'medication': medication}), 201
 
 @medications_bp.route('/update_medication/<string:name>', methods=['PUT'])
 def update_medication(name):
-    data = request .get_json()
+    data = request.get_json()
 
     if not data or 'dosage' not in data or 'reminder_times' not in data or 'frequency' not in data:
         return jsonify({'message': 'Missing required fields!'}), 400
 
-    medication_ref = db.collection('medications').where('name', '==', name).where('user_id', '==', current_user.get_id()).limit(1).get()
+    medication_ref = db.collection('medications').where('name', '==', name).where('user_email', '==', current_user.email).limit(1).get()
 
     if not medication_ref:
         return jsonify({'message': 'Medication not found!'}), 404
 
     medication_ref = medication_ref[0].reference
 
-    medication_ref.update({
-        'dosage': data['dosage'],
-        'reminder_times': data['reminder_times'],
-        'frequency': data['frequency']
-    })
+    try:
+        medication_ref.update({
+            'dosage': data['dosage'],
+            'reminder_times': data['reminder_times'],
+            'frequency': data['frequency']
+        })
+    except Exception as e:
+        logging.error(f"Error updating medication: {str(e)}")
+        return jsonify({'message': f'Error updating medication: {str(e)}'}), 500
 
     return jsonify({'message': 'Medication updated successfully!'}), 200
 
@@ -129,8 +140,8 @@ def get_medications():
     if not current_user.is_authenticated:
         return jsonify({'message': 'User  not authenticated!'}), 401
 
-    user_id = current_user.get_id()
-    medications_ref = db.collection('medications').where('user_id', '==', user_id).stream()
+    user_email = current_user.email
+    medications_ref = db.collection('medications').where('user_email', '==', user_email).stream()
 
     medications = []
     for med in medications_ref:
@@ -140,10 +151,15 @@ def get_medications():
 
 @medications_bp.route('/delete_medication/<string:name>', methods=['DELETE'])
 def delete_medication(name):
-    medication_ref = db.collection('medications').where('name', '==', name).where('user_id', '==', current_user.get_id()).limit(1).get()
+    medication_ref = db.collection('medications').where('name', '==', name).where('user_email', '==', current_user.email).limit(1).get()
 
     if not medication_ref:
         return jsonify({'message': 'Medication not found!'}), 404
 
-    medication_ref[0].reference.delete()
+    try:
+        medication_ref[0].reference.delete()
+    except Exception as e:
+        logging.error(f"Error deleting medication: {str(e)}")
+        return jsonify({'message': f'Error deleting medication: {str(e)}'}), 500
+
     return jsonify({'message': 'Medication deleted successfully!'}), 200
