@@ -1,6 +1,5 @@
 from flask import Blueprint, request, jsonify
 from flask_apscheduler import APScheduler
-from flask_login import current_user
 from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -75,10 +74,6 @@ def calculate_next_reminder(medication):
 
 @medications_bp.route('/add_medication', methods=['POST'])
 def add_medication():
-    # Check if the user is authenticated
-    if not current_user.is_authenticated:
-        return jsonify({'message': 'User  not authenticated!'}), 401
-
     # Get the input data from the request
     data = request.get_json()
 
@@ -93,7 +88,7 @@ def add_medication():
         'reminder_times': data['reminder_times'],
         'frequency': data['frequency'],
         'next_reminder': None,
-        'user_email': current_user.email  # Ensure user is authenticated
+        'user_email': data.get('user_email')  # Optional: Store user email if provided
     }
 
     # Calculate the next reminder time
@@ -112,19 +107,15 @@ def add_medication():
 
     except Exception as e:
         logging.error(f"Error scheduling reminder: {str(e)}")
-        return jsonify({'message': f'Error scheduling reminder: {str(e)}'}), 500
+        return jsonify ({'message': f'Error scheduling reminder: {str(e)}'}), 500
 
     return jsonify({'message': 'Medication added successfully!', 'medication': medication}), 201
 
 @medications_bp.route('/get_medications', methods=['GET'])
 def get_medications():
-    # Check if the user is authenticated
-    if not current_user.is_authenticated:
-        return jsonify({'message': 'User  not authenticated!'}), 401
-
     # Retrieve medications from Firestore
     try:
-        medications_ref = db.collection('medications').where('user_email', '==', current_user.email).stream()
+        medications_ref = db.collection('medications').stream()
         medications = [{**med.to_dict(), 'id': med.id} for med in medications_ref]
     except Exception as e:
         logging.error(f"Error retrieving medications: {str(e)}")
@@ -134,10 +125,6 @@ def get_medications():
 
 @medications_bp.route('/delete_medication/<medication_id>', methods=['DELETE'])
 def delete_medication(medication_id):
-    # Check if the user is authenticated
-    if not current_user.is_authenticated:
-        return jsonify({'message': 'User  not authenticated!'}), 401
-
     # Delete medication from Firestore
     try:
         medication_ref = db.collection('medications').document(medication_id)
